@@ -1,109 +1,92 @@
-# Description
+# libexword-re
 
-_libexword_ is a library that implements the low-level _Apple OBEX_ commands which is used to communicate between PC and _Casio EX-word_ dictionaries. 
+[![Windows Zig build](https://github.com/TheRainbowPhoenix/libexword-re/actions/workflows/windows-zig.yml/badge.svg)](https://github.com/TheRainbowPhoenix/libexword-re/actions/workflows/windows-zig.yml)
 
-This library comes with a program called _exword_ that uses _libexword_ to allow manipulation of files on the dictionary.
+USB file-transfer and add-on dictionary CLI for **CASIO EX-word** electronic dictionaries.
+Based on [Brian Johnson's libexword](https://github.com/brijohn/libexword) and
+[CaesarW's libexword-re](https://github.com/CaesarW/libexword-re).
 
-Features:
- * list files on device
- * upload/download files
- * delete files
- * install/remove add-on dictionaries
+> [!CAUTION]
+> Some commands modify or delete content on the device. In particular,
+> `dict reset USER` **removes installed add-on dictionaries**.
+> Do not run `dict reset` unless you have backed up everything you need.
 
-# Installation
+## Get started
 
-You can simple clone the repository and do a compilation.
+**Windows (64-bit)** — Download the artifact from the latest successful
+[Windows build workflow](https://github.com/TheRainbowPhoenix/libexword-re/actions/workflows/windows-zig.yml).
+Extract `exword.exe` and `libusb-1.0.dll` into the same directory.
+See [Windows setup and driver instructions](docs/windows.md).
 
-## Dependencies
+**Linux** — Install CMake, a C compiler, libusb 1.0 development headers and
+GNU readline development headers, then:
 
-On _Debian based distros (*buntu)_: ` build-essential cmake libusb-1.0 libglib2.0-dev libreadline-dev libtool`
-
-On *Arch Linux*: ```base-devel libusb cmake readline libtool glib2```
-
-On _Fedora (RHEL)_: ...
-
-## Compiling
-
-On Terminal:
-
-```bash
-git clone https://github.com/CaesarW/libexword-re.git
-cd libexword-re
-mkdir build
-cd build
-cmake ..
-make
+```sh
+cmake -S src -B build
+cmake --build build
+./build/exword
 ```
 
-# Commands
-_Exword_ comes with various functions. Here is the list.
+**Build Windows binaries from Linux / WSL** with Zig 0.13.0, Python 3,
+and a libusb v1.0.27 checkout:
 
-## Basic implementations
+```sh
+git clone https://github.com/TheRainbowPhoenix/libexword-re.git
+cd libexword-re
+git clone --depth 1 --branch v1.0.27 https://github.com/libusb/libusb.git .deps/libusb
+python3 scripts/build-windows.py --libusb-source .deps/libusb
+```
 
-* **connect** [mode] [region]  
-  This command connects to an attached EX-word dictionary. It accepts two optional parameters the first specifies the connection mode and be bee either library, text, or CD. The second one is the region of your dictionary and is a two letter country code.
+Make sure `zig` 0.13.0 is on PATH. Outputs go to `dist/`.
+See [build documentation](docs/build-windows.md). CI builds the same files;
+a successful CI run validates cross-compilation, not USB hardware behavior.
 
-	The default values for mode and region are library and _ja_.
+## Quick interactive session
 
-* **disconnect**  
-  This command simply disconnects from the currently connected dictionary.
+Put the EX-word into **Library → Communication**, press **Enter** until the
+device says it is waiting for connection, plug into USB, then:
 
-* **model**  
-  This command displays the raw model information about connected device.
+```text
+connect
+model
+setpath mem:///
+capacity
+list
+dict list
+disconnect
+exit
+```
 
-* **capacity**  
-  This command displays the capacity of the currently selected storage medium.
+`model` output indicates the connection worked. An SD card is **not required**:
+`mem:///` selects internal storage; `sd:///` selects an inserted SD card.
 
-* **format**  
-  This command will format the currently inserted SD card.
+| Command | Purpose |
+| --- | --- |
+| `connect [library|text|cd] [region]` | Connect (default `library ja`) |
+| `model`, `capacity`, `list` | Inspect device and current folder |
+| `setpath mem:///`, `setpath sd:///` | Select memory or SD root |
+| `send FILE`, `get FILE` | Transfer files between PC and EX-word |
+| `delete FILE` | Delete a device file |
+| `dict list` | List installed add-on dictionaries |
+| `dict auth USER [0xKEY]` | Authenticate |
+| `dict install ID`, `dict remove ID` | Add or remove a dictionary |
+| `dict reset USER` | **Destructive** credential reset |
+| `disconnect`, `exit` | Disconnect and quit |
 
-* **list**  
-  This command will list all files and directories in your current directory.
-  
-  
-## File Operations
+For installing a dictionary (including Gnuboy EX), see
+[the step-by-step guide](docs/dictionaries.md).
 
-* **delete** <filename>  
-  This command deletes deletes the specified file from the currently set directory on the connected device
+## Source and licensing
 
-* **send** <filename>  
-  This command will upload a file to the connected device. <filename> should specify the full path to the file on your local filesystem.
+The original libexword-derived project is GPL-2.0 (see [LICENSE.md](LICENSE.md)).
+The Windows build compiles libusb 1.0.27 from [its upstream source](https://github.com/libusb/libusb)
+under its own license. The Windows-specific shim sources are in `windows/deps/`.
+No proprietary Casio add-on dictionaries or game ROMs are included.
 
-* **get** <filename>  
-  This command will download a file from the connected device. <filename> should specify the full path on your local filesystem where the file should be saved.
+## Other documentation
 
-* **setpath** <path>  
-  This sets the current path on your dictionary. The path is set using the following format: <sd|mem://path>.
-
-* **set** <option> [value]  
-  This command sets various configuration options. If not value is given for the specified option its current value is printed out. 
-	Options:
-		debug - This option sets the debug level (0-5)
-		mkdir - This option tells setpath if it should create non-existent directories (yes|no)
-
-* **dict** <sub-function>  
-  This command is used to manage installed add-on dictionaries. It only works when connected in library mode.
-  
-	* **reset** <username>  
-		This will reset your authentication information using the specified username. When finished it will display the new authkey as well as save the username/authkey pair to users.dat file. It also deletes any already installed add-ons.
-		
-	* **auth** <username> [key]  
-		This performs authentication and must be called before any other sub-function except for list and reset. If key is not specified it will try to find the username in the users.dat file.
-		
-	* **list**  
-		This command will list currently installed dictionaries.
-		
-	* **decrypt** <id>  
-		This downloads and decrypts the dictionary with the specified id.
-		
-	* **remove** <id>  
-		This deletes the dictionary with the specified id.
-		
-	* **install** <id>  
-		This will install the dictionary with the specified id.
-
-# Credits
-
-Brian Johnson [@brijohn](https://github.com/brijohn) is the creator of _exword_ power tool.  
-Caesar Woo [@CaesarW](https://github.com/CaesarW) does the fork job and tries to bring modern compatibility to the software.  
-
+- [Windows setup](docs/windows.md)
+- [Zig cross-compilation](docs/build-windows.md)
+- [Installing add-on dictionaries](docs/dictionaries.md)
+- [Supported models](docs/models.md)
+- [Protocol notes](docs/protocol.md)

@@ -1,4 +1,9 @@
-.idea
-MakeFiles
-src/cmake-build-debug/
-src/build/
+.windows-build/
+.deps/
+dist/
+*.o
+*.obj
+*.exe
+*.dll
+*.dll.a
+__pycache__/
