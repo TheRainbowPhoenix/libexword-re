@@ -1,0 +1,39 @@
+name: Windows Zig build
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+      - name: Checkout libusb 1.0.27
+        run: git clone --depth 1 --branch v1.0.27 https://github.com/libusb/libusb.git .deps/libusb
+      - name: Cross-compile Windows x64
+        run: python3 scripts/build-windows.py --libusb-source .deps/libusb
+      - name: Verify Windows PE files
+        run: |
+          file dist/exword.exe dist/libusb-1.0.dll
+          file dist/exword.exe | grep -q 'PE32+'
+          file dist/libusb-1.0.dll | grep -q 'PE32+'
+      - name: Package Windows distribution
+        run: |
+          cp docs/windows.md dist/README-WINDOWS.md
+          cp LICENSE.md dist/LICENSE.md
+          cd dist && zip -9 ../libexword-re-windows-x64.zip exword.exe libusb-1.0.dll README-WINDOWS.md LICENSE.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libexword-re-windows-x64
+          path: libexword-re-windows-x64.zip
+          if-no-files-found: error
