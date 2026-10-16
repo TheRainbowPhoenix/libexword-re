@@ -24,6 +24,73 @@
  *
  */
 #include "obex.h"
+#include <stdarg.h>
+#include <time.h>
+
+int obex_verbose = 0;
+int obex_keep_alt = 0;
+int obex_casio_init = 0;
+
+/* CESG502.sys StartDevice:0x142FD -> SendVendorRequest:0x123B9.
+ * URB_FUNCTION_VENDOR_INTERFACE, request=1, value/index/length=0.
+ * WinUSB does not run the Casio driver's PnP initialization. */
+static int obex_casio_driver_init(obex_t *self)
+{
+	int result;
+	obex_trace("Casio driver init: control OUT setup=41 01 00 00 00 00 00 00 timeout_ms=1245 BEGIN\n");
+	result = libusb_control_transfer(self->usb_dev,
+		LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_INTERFACE,
+		1, 0, 0, NULL, 0, 1245);
+	obex_trace("Casio driver init: status=%d (%s) END\n", result, libusb_error_name(result));
+	return result;
+}
+
+void obex_trace(const char *format, ...)
+{
+	va_list args;
+	if (!obex_verbose)
+		return;
+	fprintf(stderr, "[USB %lld] ", (long long)time(NULL));
+	va_start(args, format);
+	vfprintf(stderr, format, args);
+	va_end(args);
+	fflush(stderr);
+}
+
+static void usb_hex(const unsigned char *data, int length)
+{
+	int i, j;
+	for (i = 0; i < length; i += 16) {
+		fprintf(stderr, "  %06x ", i);
+		for (j = 0; j < 16; ++j)
+			if (i + j < length) fprintf(stderr, "%02x ", data[i + j]);
+			else fputs("   ", stderr);
+		fputs(" |", stderr);
+		for (j = i; j < i + 16 && j < length; ++j)
+			fputc(data[j] >= 32 && data[j] < 127 ? data[j] : '.', stderr);
+		fputs("|\n", stderr);
+	}
+	fflush(stderr);
+}
+
+/* Dump at the libusb boundary, before sequence bytes are consumed. */
+static int usb_bulk(obex_t *self, unsigned char endpoint, unsigned char *data,
+		    int length, int *actual, unsigned int timeout)
+{
+	int result;
+	const char *direction = endpoint & LIBUSB_ENDPOINT_IN ? "IN" : "OUT";
+	*actual = 0;
+	obex_trace("bulk %s ep=0x%02x requested=%d timeout_ms=%u BEGIN\n",
+		   direction, endpoint, length, timeout);
+	if (obex_verbose && !(endpoint & LIBUSB_ENDPOINT_IN))
+		usb_hex(data, length); /* Attempted TX, even when USB rejects the write. */
+	result = libusb_bulk_transfer(self->usb_dev, endpoint, data, length, actual, timeout);
+	obex_trace("bulk %s ep=0x%02x status=%d (%s) actual=%d END\n",
+		   direction, endpoint, result, libusb_error_name(result), *actual);
+	if (obex_verbose && (endpoint & LIBUSB_ENDPOINT_IN) && *actual > 0)
+		usb_hex(data, *actual); /* Preserve partial data even on timeout. */
+	return result;
+}
 
 static int obex_bulk_read(obex_t *self, buf_t *msg)
 {
@@ -31,13 +98,15 @@ static int obex_bulk_read(obex_t *self, buf_t *msg)
 	int expected_length;
 	char * buffer;
 	DEBUG(self, 4, "Read from endpoint %d\n", self->read_endpoint_address);
-	if (msg->data_size > 0 && ntohs(*((uint16_t*)(msg->data + 1))) == msg->data_size)
+	if (msg->data_size >= 3 && ntohs(*((uint16_t*)(msg->data + 1))) == msg->data_size)
 		return msg->data_size;
 	do {
 		buffer = buf_reserve_end(msg, self->mtu_rx);
-		retval = libusb_bulk_transfer(self->usb_dev, self->read_endpoint_address, buffer, self->mtu_rx, &actual_length, 1245);
+		retval = usb_bulk(self, self->read_endpoint_address, (unsigned char *)buffer, self->mtu_rx, &actual_length, 1245);
 		buf_remove_end(msg, self->mtu_rx - actual_length);
-		expected_length = ntohs(*((uint16_t*)(msg->data + 1)));
+		expected_length = msg->data_size >= 3 ? ntohs(*((uint16_t*)(msg->data + 1))) : 3;
+		if (msg->data_size >= 3 && (expected_length < 3 || (size_t)expected_length < msg->data_size))
+			return LIBUSB_ERROR_IO;
 	} while ((expected_length != msg->data_size && retval == 0) ||
 		 (actual_length == 0 && retval == 0));
 	if (retval == 0)
@@ -49,7 +118,7 @@ static int obex_bulk_write(obex_t *self, buf_t *msg)
 {
 	int actual_length, retval;
 	DEBUG(self, 4, "Write to endpoint %d\n", self->write_endpoint_address);
-	retval = libusb_bulk_transfer(self->usb_dev, self->write_endpoint_address, msg->data, msg->data_size, &actual_length, 1245);
+	retval = usb_bulk(self, self->write_endpoint_address, msg->data, msg->data_size, &actual_length, 1245);
 	if (retval == 0)
 		retval = actual_length;
 	return retval;
@@ -60,7 +129,7 @@ static int obex_verify_seq(obex_t *self, uint8_t seq) {
 	char * buffer;
 	buffer = buf_reserve_end(self->rx_msg, self->mtu_rx);
 	do {
-		retval = libusb_bulk_transfer(self->usb_dev, self->read_endpoint_address, buffer, self->mtu_rx, &actual_length, 1245);
+		retval = usb_bulk(self, self->read_endpoint_address, (unsigned char *)buffer, self->mtu_rx, &actual_length, 1245);
 		if (retval < 0)
 			break;
 		count++;
@@ -89,16 +158,24 @@ static int obex_claim_interface(obex_t *ctx)
 	int ret = 0;
 	int i, j, k;
 	ret = libusb_get_active_config_descriptor(libusb_get_device(ctx->usb_dev), &config);
+	obex_trace("get_active_config status=%d (%s)\n", ret, libusb_error_name(ret));
 	if (ret < 0)
 		goto done;
 	for (i = 0; i < config->bNumInterfaces; i++) {
 		intf = &config->interface[i];
 		for (j = 0; j < intf->num_altsetting; j++) {
 			intf_desc = &intf->altsetting[j];
+			obex_trace("interface=%u alt=%u class=0x%02x subclass=0x%02x protocol=0x%02x endpoints=%u\n",
+				intf_desc->bInterfaceNumber, intf_desc->bAlternateSetting,
+				intf_desc->bInterfaceClass, intf_desc->bInterfaceSubClass,
+				intf_desc->bInterfaceProtocol, intf_desc->bNumEndpoints);
 			ctx->read_endpoint_address = 0;
 			ctx->write_endpoint_address = 0;
 			for (k = 0; k < intf_desc->bNumEndpoints; k++) {
 				ep_desc = &intf_desc->endpoint[k];
+				obex_trace("endpoint=0x%02x attributes=0x%02x max_packet=%u interval=%u\n",
+					ep_desc->bEndpointAddress, ep_desc->bmAttributes,
+					ep_desc->wMaxPacketSize, ep_desc->bInterval);
 				if ((ep_desc->bmAttributes & 3) == LIBUSB_TRANSFER_TYPE_BULK) {
 					if (!ctx->read_endpoint_address &&
 					    (ep_desc->bEndpointAddress & 0x80) == LIBUSB_ENDPOINT_IN)
@@ -117,10 +194,19 @@ done:
 	if (ret == 0) {
 		ctx->intf_num = intf_desc->bInterfaceNumber;
 		ret = libusb_claim_interface(ctx->usb_dev, ctx->intf_num);
+		obex_trace("claim_interface=%d status=%d (%s)\n", ctx->intf_num, ret, libusb_error_name(ret));
 		if (ret == 0) {
+			if (obex_keep_alt && intf_desc->bAlternateSetting == 0) {
+				obex_trace("keep-alt: skipping SetCurrentAlternateSetting(0); IN=0x%02x OUT=0x%02x\n",
+					ctx->read_endpoint_address, ctx->write_endpoint_address);
+			} else {
 			ret = libusb_set_interface_alt_setting(ctx->usb_dev, ctx->intf_num, intf_desc->bAlternateSetting);
+			obex_trace("set_alt=%u status=%d (%s) selected IN=0x%02x OUT=0x%02x\n",
+				intf_desc->bAlternateSetting, ret, libusb_error_name(ret),
+				ctx->read_endpoint_address, ctx->write_endpoint_address);
 			if (ret < 0)
 				libusb_release_interface(ctx->usb_dev, ctx->intf_num);
+			}
 		}
 	}
 	if (config != NULL)
@@ -334,6 +420,9 @@ static int obex_object_send(obex_t *self, obex_object_t *object)
 	actual = obex_bulk_write(self, txmsg);
 	if (actual < 0) {
 		return actual;
+	} else if ((size_t)actual != txmsg->data_size) {
+		obex_trace("short OUT: expected=%zu actual=%d\n", txmsg->data_size, actual);
+		return LIBUSB_ERROR_IO;
 	} else {
 		if (!obex_verify_seq(self, hdr->seq))
 			return -1;
@@ -383,7 +472,31 @@ int obex_object_receive(obex_t *self, obex_object_t *object)
 	/* Response of a CMD_CONNECT needs some special treatment.*/
 	if (object->opcode == OBEX_CMD_CONNECT) {
 		DEBUG(self, 2, "We expect a connect-rsp\n");
-		if (hdr->rsp == (OBEX_RSP_SUCCESS | OBEX_FINAL)) {
+		if (hdr->rsp != (OBEX_RSP_SUCCESS | OBEX_FINAL)) {
+			/* Rejections such as D0 00 03 contain no CONNECT parameters. */
+			ret = hdr->rsp & ~OBEX_FINAL;
+			buf_remove_begin(msg, length);
+			return ret;
+		}
+		if (self->textloader2) {
+			/* obex2_in.dll:10003935 accepts 7/9/10/11+ byte replies. */
+			if (length < 7 || length == 8 || msg->data[3] > 0x68 || msg->data[4])
+				return -1;
+			mtu = ((unsigned int)msg->data[5] << 8) | msg->data[6];
+			if (mtu < 255)
+				return -1;
+			if (length >= 9) {
+				unsigned int file_mtu = ((unsigned int)msg->data[7] << 8) | msg->data[8];
+				if (file_mtu < 255 || file_mtu > 0x4000 || (length >= 10 && msg->data[9]))
+					return -1;
+				obex_trace("TextLoader2 peer file_mtu=%u capability=0x%02x\n",
+					file_mtu, length >= 11 ? msg->data[10] : 0);
+			}
+			self->mtu_tx = mtu < 0x4000 ? mtu : 0x4000;
+			obex_trace("TextLoader2 CONNECT accepted: version=0x%02x peer_mtu=%u tx_mtu=%u\n",
+				msg->data[3], mtu, self->mtu_tx);
+			object->headeroffset = length - 3;
+		} else {
 			if (msg->data_size >= 9) {
 				conn_hdr = (struct obex_connect_hdr *) ((msg->data) + 3);
 				version = conn_hdr->version;
@@ -391,17 +504,18 @@ int obex_object_receive(obex_t *self, obex_object_t *object)
 
 				DEBUG(self, 1, "version=%02x\n", version);
 
-				/* Limit to some reasonable value (usually OBEX_DEFAULT_MTU) */
-				self->mtu_rx = OBEX_DEFAULT_MTU;
-				self->mtu_tx = 0x4006;
+				if (mtu < 255)
+					return -1;
+				/* Respect the peer's packet limit, including CY436's 0800h. */
+				self->mtu_tx = mtu < 0x4000 ? mtu : 0x4000;
 
 				DEBUG(self, 1, "requested MTU=%02x, used MTU=%02x\n", mtu, self->mtu_tx);
 			} else {
 				DEBUG(self, 1, "Malformed connect-header received\n");
 				return -1;
 			}
+			object->headeroffset = length - 3 < 8 ? length - 3 : 8;
 		}
-		object->headeroffset = 8;
 	}
 	/* So does CMD_DISCONNECT */
 	if (object->opcode == OBEX_CMD_DISCONNECT) {
@@ -524,6 +638,7 @@ obex_t * obex_init(uint16_t vid, uint16_t pid)
 {
 	obex_t *self;
 	int size;
+	int claimed = 0;
 	self = malloc(sizeof(obex_t));
 	if (self == NULL)
 		return NULL;
@@ -533,10 +648,14 @@ obex_t * obex_init(uint16_t vid, uint16_t pid)
 		goto out_err;
 
 	self->usb_dev = libusb_open_device_with_vid_pid(self->usb_ctx, vid, pid);
+	obex_trace("transport open %04x:%04x %s\n", vid, pid, self->usb_dev ? "OK" : "FAILED");
 	if (self->usb_dev == NULL)
 		goto out_err;
 
 	if (obex_claim_interface(self) < 0)
+		goto out_err;
+	claimed = 1;
+	if (obex_casio_init && obex_casio_driver_init(self) < 0)
 		goto out_err;
 
 	self->seq_num = 0;
@@ -562,6 +681,8 @@ out_err:
 		buf_free(self->tx_msg);
 	if (self->rx_msg != NULL)
 		buf_free(self->rx_msg);
+	if (self->usb_dev && claimed)
+		libusb_release_interface(self->usb_dev, self->intf_num);
 	if (self->usb_dev)
 		libusb_close(self->usb_dev);
 	if (self->usb_ctx)
@@ -590,6 +711,8 @@ void obex_set_connect_info(obex_t *self, uint8_t ver, uint8_t locale)
 {
 	self->version = ver;
 	self->locale  = locale;
+	obex_trace("connect parameters version/mode=0x%02x locale=0x%02x rx_mtu=%u\n",
+		ver, locale, self->mtu_rx);
 }
 
 void obex_register_callback(obex_t *self, obex_callback cb, void *userdata)
@@ -629,10 +752,13 @@ obex_object_t * obex_object_new(obex_t *self, uint8_t cmd)
 		} else {
 			conn_hdr = (struct obex_connect_hdr *) buf_reserve_end(object->tx_nonhdr_data, 7);
 			conn_hdr->version = self->version;
-			conn_hdr->flags = 0x40;              /* Flags */
+			conn_hdr->flags = self->textloader2 ? 0 : 0x40;
 			conn_hdr->mtu = htons(self->mtu_rx); /* Max packet size */
 			memcpy(conn_hdr->unknown, "\x40\x00", 2); //unkown data sent during connect
 			conn_hdr->locale = self->locale;
+			obex_trace("CONNECT profile=%s version=0x%02x flags=0x%02x tail=0x%02x\n",
+				self->textloader2 ? "TextLoader2" : "legacy",
+				conn_hdr->version, conn_hdr->flags, conn_hdr->locale);
 		}
 	}
 	return object;

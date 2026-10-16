@@ -29,6 +29,8 @@
 #include "exword.h"
 #include "util.h"
 #include "list.h"
+#include "usb_trace.h"
+#include "backup.h"
 
 struct state {
 	exword_t *device;
@@ -39,6 +41,7 @@ struct state {
 	int mkdir;
 	int authenticated;
 	int sd_inserted;
+	int last_response;
 	char *cwd;
 	struct list_head cmd_list;
 };
@@ -71,14 +74,20 @@ void send(struct state *s);
 void get(struct state *s);
 void setpath(struct state *s);
 void dict(struct state *s);
+void dump(struct state *s);
 
 struct command commands[] = {
+{"dump", dump, "dump LOCAL_DIRECTORY\t- recursively back up current device folder\n",
+	"Downloads raw files and subfolders into a NEW local directory.\n"
+	"No decryption, authentication or device writes. Manifest records failures.\n"
+	"Nonportable local names use percent escapes; see the manifest for mapping.\n"},
 {"connect", connect, "connect [mode] [region]\t- connect to attached dictionary\n",
 	"Connects to device.\n\n"
 	"Region specifies the region of the device (default:ja).\n"
 	"Mode can be one of the following values:\n"
 	"library - connect as CASIO Library (default)\n"
 	"text    - connect as Textloader\n"
+	"text2   - connect as TextLoader 2 (XD-D6600 diagnostic profile)\n"
 	"cd      - connect as CDLoader\n"},
 {"disconnect", disconnect, "disconnect\t\t- disconnect from dictionary\n",
 	"Disconnects from device.\n"},
@@ -254,6 +263,7 @@ void help(struct state *s)
 void connect(struct state *s)
 {
 	int  options = OPEN_LIBRARY | LOCALE_JA;
+	int response;
 	char *mode;
 	char *locale;
 	int error = 0;
@@ -269,6 +279,8 @@ void connect(struct state *s)
 			options = OPEN_LIBRARY;
 		} else if (strcmp(mode, "text") == 0) {
 			options = OPEN_TEXT;
+		} else if (strcmp(mode, "text2") == 0) {
+			options = OPEN_TEXT2;
 		} else if (strcmp(mode, "cd") == 0) {
 			options = OPEN_CD;
 		} else {
@@ -301,19 +313,29 @@ void connect(struct state *s)
 		}
 	}
 	if (!error) {
+		obex_trace("CLI connect mode=%s locale=0x%02x options=0x%04x\n",
+			(options & OPEN_TEXT2) ? "text2" : (options & OPEN_TEXT) ? "text" : (options & OPEN_CD) ? "cd" : "library",
+			options & 0xff, options);
 		printf("connecting to device...");
 		s->device = exword_open2(options);
 		if (s->device == NULL) {
 			printf("device not found\n");
 		} else {
 			exword_set_debug(s->device, s->debug);
-			if (exword_connect(s->device) != 0x20) {
-				printf("connect failed\n");
+			response = exword_connect(s->device);
+			obex_trace("CONNECT response=%d (0x%x)\n", response, response);
+			if (response != 0x20) {
+				printf("connect failed: %s (result %d / 0x%x)\n",
+					exword_response_to_string(response), response, response);
 				exword_close(s->device);
 				s->device = NULL;
 			} else {
-				if (exword_setpath(s->device, ROOT, 0) == 0x20) {
-					if (exword_list(s->device, &entries, &count) == 0x20) {
+				response = exword_setpath(s->device, ROOT, 0);
+				obex_trace("initial SETPATH root response=%d (0x%x)\n", response, response);
+				if (response == 0x20) {
+					response = exword_list(s->device, &entries, &count);
+					obex_trace("initial LIST response=%d (0x%x)\n", response, response);
+					if (response == 0x20) {
 						for (i = 0; i < count; i++) {
 							if (strcmp(entries[i].name, "_SD_00") == 0) {
 								s->sd_inserted = 1;
@@ -323,9 +345,10 @@ void connect(struct state *s)
 						exword_free_list(entries);
 					}
 				}
-				_setpath(s, INTERNAL_MEM, "/", 2);
+				response = _setpath(s, INTERNAL_MEM, "/", 0);
+				obex_trace("initial SETPATH internal response=%d (0x%x)\n", response, response);
 				s->connected = 1;
-				s->mode = (options & 0xff00);
+				s->mode = (options & OPEN_TEXT2) ? OPEN_TEXT : (options & 0xff00);
 				printf("done\n");
 			}
 		}
@@ -354,6 +377,7 @@ void model(struct state *s)
 	if (!s->connected)
 		return;
 	rsp = exword_get_model(s->device, &model);
+	s->last_response = rsp;
 	if (rsp == 0x20) {
 		printf("Model: %s\nSub: %s\n", model.model, model.sub_model);
 		if (model.capabilities & CAP_EXT)
@@ -377,6 +401,7 @@ void capacity(struct state *s)
 	if (!s->connected)
 		return;
 	rsp = exword_get_capacity(s->device, &cap);
+	s->last_response = rsp;
 	if (rsp == 0x20)
 		printf("Capacity: %d / %d\n", cap.total, cap.free);
 	else
@@ -459,6 +484,15 @@ void delete(struct state *s)
 	}
 }
 
+void dump(struct state *s)
+{
+	char *destination = peek_arg(&s->cmd_list);
+	if (!s->connected || !s->cwd) { printf("Connect and select a device folder first.\n"); return; }
+	if (!destination) { printf("Usage: dump NEW_LOCAL_DIRECTORY (no spaces)\n"); return; }
+	/* Never retains a pointer into the mutable command queue or changes s->cwd. */
+	s->last_response = exword_dump_tree(s->device, s->cwd, destination) ? 0x20 : -1;
+}
+
 void list(struct state *s)
 {
 	int rsp, i;
@@ -469,6 +503,7 @@ void list(struct state *s)
 	if (!s->connected)
 		return;
 	rsp = exword_list(s->device, &entries, &count);
+	s->last_response = rsp;
 	if (rsp == 0x20) {
 		for (i = 0; i < count; i++) {
 			if (entries[i].flags & LIST_F_UNICODE) {
@@ -517,7 +552,7 @@ void dict(struct state *s)
 	if (peek_arg(&(s->cmd_list)) == NULL) {
 		printf("No sub-function specified.\n");
 	} else {
-		subfunc = xmalloc(strlen(peek_arg(&(s->cmd_list)) + 1));
+		subfunc = xmalloc(strlen(peek_arg(&(s->cmd_list))) + 1);
 		strcpy(subfunc, peek_arg(&(s->cmd_list)));
 		dequeue_arg(&(s->cmd_list));
 		if (strcmp(subfunc, "list") == 0) {
@@ -536,7 +571,7 @@ void dict(struct state *s)
 			if (peek_arg(&(s->cmd_list)) == NULL) {
 				printf("No username specified.\n");
 			} else {
-				user = xmalloc(strlen(peek_arg(&(s->cmd_list)) + 1));
+				user = xmalloc(strlen(peek_arg(&(s->cmd_list))) + 1);
 				strcpy(user, peek_arg(&(s->cmd_list)));
 				dequeue_arg(&(s->cmd_list));
 				if (peek_arg(&(s->cmd_list)) == NULL) {
@@ -732,7 +767,11 @@ void interactive(struct state *s)
 		free(prompt);
 		prompt = create_prompt(s->cwd);
 		line = readline(prompt);
-		if (line == NULL || *line == '\0')
+		if (line == NULL) {
+			quit(s);
+			break;
+		}
+		if (*line == '\0')
 			continue;
 		add_history(line);
 		fill_arg_list(&(s->cmd_list), line);
@@ -744,11 +783,135 @@ void interactive(struct state *s)
 	store_history();
 }
 
+/* Deliberately allow only inspection operations, not arbitrary command scripts. */
+static int query_options(const char *mode, const char *region, int *options)
+{
+	static const char *regions[] = {"ja", "kr", "cn", "de", "es", "fr", "ru"};
+	static const int locales[] = {LOCALE_JA, LOCALE_KR, LOCALE_CN, LOCALE_DE,
+		LOCALE_ES, LOCALE_FR, LOCALE_RU};
+	int i, flags;
+	if (!strcmp(mode, "library")) flags = OPEN_LIBRARY;
+	else if (!strcmp(mode, "text")) flags = OPEN_TEXT;
+	else if (!strcmp(mode, "text2")) flags = OPEN_TEXT2;
+	else return 0;
+	for (i = 0; i < (int)(sizeof(locales) / sizeof(locales[0])); ++i) {
+		if (!strcmp(region, regions[i])) {
+			*options = flags | locales[i];
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static int run_query(struct state *s, int options, const char *name)
+{
+	int response, disconnect_response;
+	obex_trace("QUERY name=%s options=0x%04x BEGIN\n", name, options);
+	s->device = exword_open2(options);
+	if (!s->device) {
+		fprintf(stderr, "Unable to open USB device; inspect discovery/driver log.\n");
+		return 1;
+	}
+	exword_set_debug(s->device, s->debug);
+	response = exword_connect(s->device);
+	printf("CONNECT: %s (result %d / 0x%x)\n",
+		exword_response_to_string(response), response, response);
+	obex_trace("QUERY CONNECT result=%d (0x%x)\n", response, response);
+	if (response == 0x50) {
+		printf("Device returned D0: profile mismatch OR device session/storage preflight failure.\n"
+		       "USB ACK/response means this is not a transport timeout.\n");
+	}
+	if (response == 0x20) {
+		s->connected = 1;
+		s->last_response = response;
+		if (!strcmp(name, "capacity") || !strcmp(name, "list")) {
+			/* exword_setpath accepts a boolean: false encodes no-create (02). */
+			response = _setpath(s, INTERNAL_MEM, "/", 0);
+			printf("SETPATH internal: %s (0x%x)\n", exword_response_to_string(response), response);
+		}
+		if (response == 0x20) {
+			if (!strcmp(name, "model")) model(s);
+			else if (!strcmp(name, "capacity")) capacity(s);
+			else if (!strcmp(name, "list")) list(s);
+			response = s->last_response;
+		}
+		disconnect_response = exword_disconnect(s->device);
+		printf("DISCONNECT: %s (0x%x)\n",
+			exword_response_to_string(disconnect_response), disconnect_response);
+		if (response == 0x20) response = disconnect_response;
+	}
+	exword_close(s->device);
+	s->device = NULL;
+	s->connected = 0;
+	free(s->cwd);
+	s->cwd = NULL;
+	obex_trace("QUERY name=%s result=%d (0x%x) END\n", name, response, response);
+	return response == 0x20 ? 0 : 1;
+}
+
 int main(int argc, const char** argv)
 {
 	struct state s;
+	int i;
+	const char *usb_log = NULL;
+	const char *query = NULL;
+	int options = 0;
 	setlocale(LC_ALL, "");
 	memset(&s, 0, sizeof(struct state));
+	for (i = 1; i < argc; ++i) {
+		if (!strcmp(argv[i], "-v") || !strcmp(argv[i], "--verbose")) {
+			obex_verbose = 1;
+		} else if (!strcmp(argv[i], "--keep-alt")) {
+			obex_keep_alt = 1;
+		} else if (!strcmp(argv[i], "--casio-init")) {
+			obex_casio_init = 1;
+		} else if (!strcmp(argv[i], "--query")) {
+			if (query || i + 3 >= argc ||
+			    !query_options(argv[i + 1], argv[i + 2], &options)) {
+				fprintf(stderr, "Use --query library|text|text2 ja|kr|cn|de|es|fr|ru handshake|model|capacity|list\n");
+				return 2;
+			}
+			query = argv[i + 3];
+			if (strcmp(query, "handshake") && strcmp(query, "model") &&
+			    strcmp(query, "capacity") && strcmp(query, "list")) {
+				fprintf(stderr, "Query must be handshake, model, capacity or list (read-only).\n");
+				return 2;
+			}
+			i += 3;
+		} else if (!strcmp(argv[i], "--usb-log")) {
+			if (++i == argc) {
+				fprintf(stderr, "--usb-log requires a filename\n");
+				return 2;
+			}
+			usb_log = argv[i];
+			obex_verbose = 1;
+		} else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
+			printf("Usage: %s [-v|--verbose] [--usb-log FILE] [--keep-alt] [--casio-init]\n"
+			       "Verbose mode dumps USB discovery, transfers and protocol diagnostics.\n"
+			       "--usb-log writes diagnostics to FILE (overwrites); commands stay interactive.\n"
+			       "--keep-alt skips redundant selection of USB alternate setting zero.\n"
+			       "--casio-init sends the vendor initialization used by CESG502.sys.\n", argv[0]);
+			printf("--query MODE REGION NAME runs one read-only query and exits.\n"
+			       "  MODE: library, text, text2; REGION: ja, kr, cn, de, es, fr, ru\n"
+			       "  NAME: handshake, model, capacity, list\n"
+			       "  handshake sends only CONNECT and, if accepted, DISCONNECT.\n"
+			       "  Exit codes: 0 success, 1 device/protocol failure, 2 invalid arguments.\n"
+			       "Example: exword --keep-alt --casio-init --usb-log cy436-cn.log --query library cn handshake\n");
+			return 0;
+		} else {
+			fprintf(stderr, "Unknown option: %s (use --help)\n", argv[i]);
+			return 2;
+		}
+	}
+	if (usb_log && !freopen(usb_log, "w", stderr)) {
+		perror("Unable to open USB log");
+		return 2;
+	}
+	if (obex_verbose) {
+		s.debug = 5;
+		obex_trace("libexword-re verbose USB capture started; timestamps are Unix seconds\n");
+	}
+	if (query) return run_query(&s, options, query);
 	interactive(&s);
 	return 0;
 }

@@ -13,7 +13,7 @@ USB_FILES = [
     "os/events_windows.c", "os/threads_windows.c", "os/windows_common.c",
     "os/windows_winusb.c", "os/windows_usbdk.c",
 ]
-EXWORD_FILES = ["main.c", "databuffer.c", "dict.c", "exword.c", "obex.c", "util.c"]
+EXWORD_FILES = ["main.c", "databuffer.c", "dict.c", "exword.c", "obex.c", "util.c", "backup.c"]
 USB_LIBS = ["kernel32", "setupapi", "advapi32", "user32",
             "ole32", "oleaut32", "winusb", "uuid"]
 EXWORD_LIBS = ["kernel32", "user32", "ole32", "oleaut32", "shell32",
@@ -43,6 +43,7 @@ def main():
                    type=Path, help="libusb v1.0.27 source checkout")
     p.add_argument("--target", default="x86_64-windows-gnu")
     p.add_argument("--output", default=str(ROOT / "dist"), type=Path)
+    p.add_argument("--tests", action="store_true", help="Also compile USB-free regression executables")
     args = p.parse_args()
     usb = args.libusb_source.resolve()
     dist = args.output.resolve()
@@ -93,6 +94,19 @@ def main():
         *exword_objects, import_library,
         *("-l" + name for name in EXWORD_LIBS), "-o", exe)
     print(f"Built {exe} and {dll}")
+    if args.tests:
+        for name in ("connect_test", "driver_init_test", "usb_trace_test", "download_test", "backup_test", "auth_test"):
+            files = [ROOT / "tests" / (name + ".c")]
+            if name != "backup_test":
+                files += [SOURCES / "databuffer.c", import_library]
+            if name == "download_test":
+                files += [SOURCES / "obex.c", DEPS / "iconv" / "iconv.c"]
+            if name == "auth_test":
+                files += [SOURCES / "exword.c", SOURCES / "obex.c", SOURCES / "util.c",
+                          DEPS / "iconv" / "iconv.c"]
+            run(args.zig, "cc", "-target", args.target, "-O2", "-UNDEBUG",
+                *exword_flags, *files, *("-l" + lib for lib in EXWORD_LIBS),
+                "-o", dist / (name + ".exe"))
 
 
 if __name__ == "__main__":

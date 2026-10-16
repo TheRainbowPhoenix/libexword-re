@@ -22,3 +22,14 @@ The build uses native source from this repository, links minimal Windows
 The readline shim supports basic line input and on-disk history only; it
 does not provide GNU readline's interactive line-editing features.
 Do not treat this CI as a substitute for testing with a real device.
+
+On Windows, build and run the USB-free regression suite with:
+
+```powershell
+python scripts/build-windows.py --libusb-source .deps/libusb --tests
+python scripts/test-windows.py
+```
+
+CI cross-compiles the distribution on Linux and separately builds/runs these
+tests on Windows. Pushes to master and codex/** trigger artifact builds; no
+release is published. The archive includes the query and raw-backup guides.

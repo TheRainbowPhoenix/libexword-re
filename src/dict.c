@@ -259,9 +259,11 @@ int _save_user_key(char *name, char *key)
 	}
 	while (i < length) {
 		if (strcmp(name, buffer + i + 1) == 0) {
+			memcpy(buffer + i + 1 + *(buffer + i), key, 20);
+			ret = write_file(file, buffer, length);
 			free(file);
 			free(buffer);
-			return 1;
+			return ret == 0x20;
 		}
 		i += 21 + *(buffer + i);
 	}
@@ -355,8 +357,12 @@ int dict_auth(exword_t *device, char *user, char *auth)
 	uint16_t count;
 	exword_dirent_t *entries;
 	exword_authchallenge_t c;
-	exword_authinfo_t ai;
 	exword_userid_t u;
+	if (!user || !*user || strlen(user) > 16) {
+		printf("Username must contain 1 to 16 bytes.\n"); return 0;
+	}
+	memset(&c, 0, sizeof(c));
+	memset(&u, 0, sizeof(u));
 	if (auth == NULL) {
 		rsp = _load_user_key(user, c.challenge);
 		if (!rsp)
@@ -364,42 +370,56 @@ int dict_auth(exword_t *device, char *user, char *auth)
 	} else {
 		memcpy(c.challenge, auth, 20);
 	}
-	memcpy(ai.blk1, "FFFFFFFFFFFFFFFF", 16);
 	strncpy(u.name, user, 16);
-	strncpy(ai.blk2, user, 24);
-	exword_setpath(device, "\\_INTERNAL_00", 0);
+	if (exword_setpath(device, "\\_INTERNAL_00", 0) != 0x20) return 0;
 	rsp = exword_authchallenge(device, c);
 	if (rsp != 0x20)
 		return 0;
-	exword_setpath(device, "", 0);
-	exword_list(device, &entries, &count);
+	if (exword_setpath(device, "", 0) != 0x20) return 0;
+	entries = NULL;
+	if (exword_list(device, &entries, &count) != 0x20) return 0;
 	for (i = 0; i < count; i++) {
 		if (strcmp(entries[i].name, "_SD_00") == 0) {
-			exword_setpath(device, "\\_SD_00", 0);
+			if (exword_setpath(device, "\\_SD_00", 0) != 0x20) {
+				exword_free_list(entries); return 0;
+			}
 			rsp = exword_authchallenge(device, c);
 			if (rsp != 0x20) {
-				exword_authinfo(device, &ai);
+				printf("SD authentication failed; credentials were NOT reset. Remove the card to authenticate internal storage only.\n");
+				exword_free_list(entries); return 0;
 			}
 		}
 	}
 	exword_free_list(entries);
-	exword_userid(device, u);
-	return 1;
+	return exword_userid(device, u) == 0x20;
 }
 
 int dict_reset(exword_t *device, char *user)
 {
-	int i;
+	int i, rsp;
 	exword_authinfo_t info;
 	exword_userid_t u;
+	if (!user || !*user || strlen(user) > 16) {
+		printf("Username must contain 1 to 16 bytes.\n"); return 0;
+	}
 	memset(&info, 0, sizeof(exword_authinfo_t));
 	memset(&u, 0, sizeof(exword_userid_t));
 	memcpy(info.blk1, "FFFFFFFFFFFFFFFF", 16);
 	strncpy(info.blk2, user, 24);
 	strncpy(u.name, user, 16);
-	exword_setpath(device, "\\_INTERNAL_00", 0);
-	exword_authinfo(device, &info);
-	exword_userid(device, u);
+	rsp = exword_setpath(device, "\\_INTERNAL_00", 0);
+	if (rsp == 0x20) rsp = exword_authinfo(device, &info);
+	if (rsp != 0x20) {
+		printf("Credential reset failed: %s (%d).\n", exword_response_to_string(rsp), rsp);
+		return 0;
+	}
+	rsp = exword_userid(device, u);
+	if (rsp != 0x20) {
+		printf("Reset succeeded but setting user ID failed: %s (%d).\n", exword_response_to_string(rsp), rsp);
+		printf("Recovery key: 0x");
+		for (i = 0; i < 20; ++i) printf("%02X", (unsigned char)info.challenge[i]);
+		printf("\n"); return 0;
+	}
 	printf("User %s with key 0x", u.name);
 	for (i = 0; i < 20; i++) {
 		printf("%02X", info.challenge[i] & 0xff);

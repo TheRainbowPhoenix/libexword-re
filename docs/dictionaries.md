@@ -1,5 +1,15 @@
 # Installing add-on dictionaries (including Gnuboy EX)
 
+Use `connect library cn` for the confirmed CY436 device rather than the Japanese
+default used in the generic example below. Registration/reset affects internal
+storage; it does not silently re-register an SD card. Authentication now fails
+without resetting anything when SD credentials differ. Remove the card first
+if you intentionally want to register/use internal storage only.
+
+Usernames must be 1 to 16 bytes. Reset reports protocol failures and refreshes
+the saved key for an existing username. Always preserve the newly printed key;
+do not assume a previously saved key remains valid after resetting.
+
 > [!WARNING]
 > `dict reset USER` resets device credentials and **removes installed
 > add-on dictionaries**. Check and back up any existing purchases/add-ons

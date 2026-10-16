@@ -71,6 +71,8 @@ typedef struct exword_t exword_t;
  *  This mode is used to upload and delete text files.
  */
 #define OPEN_TEXT      0x0100
+/** TextLoader 2 handshake recovered from Casio's Japanese obex2.dll (flags 0). */
+#define OPEN_TEXT2     0x0400
 /** @ingroup device
  *  Opens device in CD mode.
  *  This mode is used to upload cd audio.

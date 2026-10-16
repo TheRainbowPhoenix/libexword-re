@@ -35,6 +35,8 @@
 #include "list.h"
 #include "databuffer.h"
 
+#include "usb_trace.h"
+
 #define log_debug(format, ...) fprintf(stderr, format, ## __VA_ARGS__)
 #define log_debug_prefix ""
 
@@ -170,6 +172,7 @@ typedef struct _obex {
 	uint8_t write_endpoint_address;
 	uint8_t version;
 	uint8_t locale;
+	uint8_t textloader2;
 	uint16_t mtu_rx;
 	uint16_t mtu_tx;
 	uint16_t mtu_tx_max;

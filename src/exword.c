@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <iconv.h>
 #include <errno.h>
+#include <limits.h>
 #include "obex.h"
 #include "exword.h"
 
@@ -337,7 +338,7 @@ exword_t * exword_open2(uint16_t options)
 	libusb_device_handle *dev = NULL;
 
 	locale = options & 0xff;
-	if (options & OPEN_TEXT)
+	if (options & (OPEN_TEXT | OPEN_TEXT2))
 		ver = locale;
 	else if (options & OPEN_CD)
 		ver = 0xf0;
@@ -349,10 +350,12 @@ exword_t * exword_open2(uint16_t options)
 		return NULL;
 	memset(self, 0, sizeof(exword_t));
 	ret = libusb_init(NULL);
+	obex_trace("discovery libusb_init status=%d (%s)\n", (int)ret, libusb_error_name((int)ret));
 	if (ret < 0)
 		goto error;
 
 	ret = libusb_get_device_list(NULL, &dev_list);
+	obex_trace("discovery device_count=%ld\n", (long)ret);
 	if (ret < 0) {
 		libusb_exit(NULL);
 		goto error;
@@ -361,8 +364,14 @@ exword_t * exword_open2(uint16_t options)
 	for (i = 0; i < ret; i++) {
 		device = dev_list[i];
 		if (libusb_get_device_descriptor(device, &desc) == 0) {
+			obex_trace("device bus=%u address=%u vid=%04x pid=%04x class=0x%02x bcdDevice=%04x%s\n",
+				libusb_get_bus_number(device), libusb_get_device_address(device),
+				desc.idVendor, desc.idProduct, desc.bDeviceClass, desc.bcdDevice,
+				desc.idVendor == 0x07cf && desc.idProduct == 0x6101 ? " MATCH" : " skipped");
 			if (desc.idVendor == 0x07cf && desc.idProduct == 0x6101) {
-				if (libusb_open(device, &dev) >= 0) {
+				int open_result = libusb_open(device, &dev);
+				obex_trace("discovery open status=%d (%s)\n", open_result, libusb_error_name(open_result));
+				if (open_result >= 0) {
 					self->vid = desc.idVendor;
 					self->pid = desc.idProduct;
 					libusb_get_string_descriptor_ascii(dev, desc.iManufacturer, self->manufacturer, 20);
@@ -383,6 +392,7 @@ exword_t * exword_open2(uint16_t options)
 	if (self->obex_ctx == NULL)
 		goto error;
 	obex_set_connect_info(self->obex_ctx, ver, locale);
+	self->obex_ctx->textloader2 = (options & OPEN_TEXT2) != 0;
 	obex_register_callback(self->obex_ctx, exword_handle_callbacks, self);
 	return self;
 
@@ -501,6 +511,9 @@ int exword_get_file(exword_t *self, char* filename, char **buffer, int *len)
 	uint8_t hi;
 	uint32_t hv_size;
 	char *unicode;
+	const uint8_t *body = NULL;
+	uint32_t advertised = 0, received = 0;
+	int has_length = 0, has_body = 0;
 	*len = 0;
 	*buffer = NULL;
 	unicode = locale_to_utf16(&unicode, &length, filename, strlen(filename) + 1);
@@ -517,12 +530,24 @@ int exword_get_file(exword_t *self, char* filename, char **buffer, int *len)
 	if ((rsp & ~OBEX_FINAL) == OBEX_RSP_SUCCESS) {
 		while (obex_object_getnextheader(self->obex_ctx, obj, &hi, &hv, &hv_size)) {
 			if (hi == OBEX_HDR_LENGTH) {
-				*len = hv.bq4;
-				*buffer = malloc(*len);
+				advertised = hv.bq4;
+				has_length = 1;
 			}
 			if (hi == OBEX_HDR_BODY) {
-				memcpy(*buffer, hv.bs, *len);
-				break;
+				body = hv.bs;
+				received = hv_size;
+				has_body = 1;
+			}
+		}
+		/* Never mark truncated data as a successful backup or over-read the body. */
+		if ((!has_body && (!has_length || advertised)) || received > INT_MAX ||
+		    (has_length && advertised != received)) rsp = -1;
+		else {
+			*buffer = malloc(received ? received : 1);
+			if (!*buffer) rsp = -1;
+			else {
+				if (received) memcpy(*buffer, body, received);
+				*len = (int)received;
 			}
 		}
 	}

@@ -7,3 +7,13 @@ dist/
 *.dll
 *.dll.a
 __pycache__/
+
+# Local device content, credentials, capture logs and add-in packages
+backup-*/
+*.log
+users.dat
+*.INF
+/RRDMP/
+/XDTST/
+/phoebe-test.txt
+/scripts.zip

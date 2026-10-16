@@ -43,6 +43,15 @@ a successful CI run validates cross-compilation, not USB hardware behavior.
 
 ## Quick interactive session
 
+For a complete file-tree backup, select the SD root with `setpath sd:///`, then
+run `dump backup-sd-01`. It recursively downloads raw files into a new local folder
+and records failures without changing device credentials. See [raw backups](docs/raw-backup.md).
+
+For a single read-only PC Link test, the updated tool also supports
+`--query library cn handshake` (or `model`, `capacity`, `list`). The CY436 ROM
+selects the Chinese profile; do not assume that profile for other devices.
+See [query commands and capture examples](docs/pc-link-queries.md).
+
 Put the EX-word into **Library → Communication**, press **Enter** until the
 device says it is waiting for connection, plug into USB, then:
 
@@ -60,12 +69,24 @@ exit
 `model` output indicates the connection worked. An SD card is **not required**:
 `mem:///` selects internal storage; `sd:///` selects an inserted SD card.
 
+To diagnose USB connection failures, start `exword --verbose` or
+`exword --usb-log usb-trace.log`. The latter writes full USB transfer hex dumps,
+discovery details, endpoints and errors to a file while commands stay interactive.
+`--keep-alt` skips redundant USB alternate-setting selection; `--casio-init`
+sends the vendor initialization used by the Casio driver. These remain optional.
+The CY436 device was successfully connected and browsed with `connect library cn`;
+the default Japanese profile does not fit that device. `connect text2 ja` is an
+experimental TextLoader2 profile, not a universal connection fix.
+See [PC Link queries](docs/pc-link-queries.md) for explicit profile tests.
+USB logs contain transferred file contents and may contain credentials: keep them private.
+
 | Command | Purpose |
 | --- | --- |
-| `connect [library|text|cd] [region]` | Connect (default `library ja`) |
+| `connect [library|text|text2|cd] [region]` | Connect (default `library ja`; `text2` uses Casio's newer TextLoader handshake) |
 | `model`, `capacity`, `list` | Inspect device and current folder |
 | `setpath mem:///`, `setpath sd:///` | Select memory or SD root |
 | `send FILE`, `get FILE` | Transfer files between PC and EX-word |
+| `dump NEW_LOCAL_DIRECTORY` | Recursively back up the current device folder, without overwrites |
 | `delete FILE` | Delete a device file |
 | `dict list` | List installed add-on dictionaries |
 | `dict auth USER [0xKEY]` | Authenticate |
